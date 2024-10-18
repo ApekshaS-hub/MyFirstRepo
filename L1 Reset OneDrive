@@ -1,0 +1,883 @@
+<#
+.SYNOPSIS
+This Remote Action can be used to fix One Drive Sync Issues.
+
+.DESCRIPTION
+Below steps are performed in the script:
+-Verifes if the system is connected to Office network by testing the url provided in the input parameter.
+- If the system is not connected to Office nw then it displays the Campaign to user to connect to Office NW and exits.
+- If the system is connected to Office NW then 'gpupdate /force' command and displays user a campaign to verify the OneDrive Sync issue.
+- If user verifies that issue is fixed then script exits otherwise it clears the credentials specific to One drive and again asks user to verify.
+- if user verifies issues is fixed then the script ends otherwise it performs One drive reset and displays user a campaign stating that one drive reset is completed
+and script ends.
+
+
+.FUNCTIONALITY
+Remediation
+
+.INPUTS
+ID  Label                            Description
+1   NetworkTestUrl                   Test Url to test the connectivity to office network
+2   ConnectRCCampaignId              Campaign Id to show user to connect to Office NW.
+3   CheckOneDriveCampaignId          Campaign Id to show User to verify the OneDrive Issue is fixed or not.
+4   CheckOneDriveCampaignQuestion    Question for which the answer is to be verified for Check OneDrive campiagn.
+5   CheckOneDriveCampaignAnswer      Answer for which the response of user to be matched for Check OneDrive campiagn: If 
+                                     the user's answer matches this answer then the script will be exited here else moves to next step.
+6   ReCheckOneDriveCampaignId        Campaign Id to show User to reverify the OneDrive Issue is fixed or not after clearing One Drive credentials.
+7   ReCheckOneDriveCampaignQuestion  Question for which the answer is to be verified ReCheckOneDriveCampaign. 
+8   ReCheckOneDriveCampaignAnswer    Answer for which the response of user to be matched for ReCheckOneDriveCampaign: If 
+                                     the user's answer matches this answer then the script will be exited here else moves to next step.
+9	OneDriveFinalCampaignId			 Campaign Id to confirm if the issue is resolved or not.
+10  OneDriveResetCampaignId          Campaign Id to show user to ask for before resetting OneDrive. 
+11  CampaignTimeout             	 Timeout for the Campaigns.
+11	ScreenUnlockTimeout				 Timeout in case of Screen lock or fullscreen app opened.
+
+.OUTPUTS
+None.
+
+
+.NOTES
+Provider:           V R Anjali
+Context:            Interactive user
+Last Generated:     20 Jun 2023
+Version:            1.0 - Initial release 
+                    1.1 - added campaign timeout
+                    1.2 - Changed the flow of reset one drive campaign to be displayed pre resetting instead of post.
+                    1.3 - Added a different campaign to be displayed after Clearing the OneDrive credentials. 
+                    1.4 - Changed '[net.webrequest]::Create' to 'Test-NetConnection'
+					1.5 - Added Campaigns as per EY standard.
+#>
+#
+# Input parameters definition
+#
+param(
+    [Parameter(Mandatory = $true)][string]$NetworkTestUrl,
+    [Parameter(Mandatory = $true)][string]$ConnectRCCampaignId,
+    [Parameter(Mandatory = $true)][string]$CheckOneDriveCampaignId,
+    [Parameter(Mandatory = $true)][string]$CheckOneDriveCampaignQuestion,
+    [Parameter(Mandatory = $true)][string]$CheckOneDriveCampaignAnswer,
+    [Parameter(Mandatory = $true)][string]$ReCheckOneDriveCampaignId,
+    [Parameter(Mandatory = $true)][string]$ReCheckOneDriveCampaignQuestion,
+    [Parameter(Mandatory = $true)][string]$ReCheckOneDriveCampaignAnswer,
+    [Parameter(Mandatory = $true)][string]$OneDriveResetCampaignId,
+	[Parameter(Mandatory = $true)][string]$OneDriveFinalCampaignId,
+    [Parameter(Mandatory = $true)][string]$CampaignTimeout,
+	[Parameter(Mandatory = $true)][int]$ScreenUnlockTimeout
+)
+# End of parameters definition
+
+$env:Path = 'C:\Windows\System32;C:\Windows;C:\Windows\System32\Wbem;C:\Windows\System32\WindowsPowerShell\v1.0\'
+
+#
+# Constants definition
+#
+New-Variable -Name 'ERROR_EXCEPTION_TYPE' `
+    -Value @{Environment = '[Environment error]'
+             Input = '[Input error]'
+             Internal = '[Internal error]'} `
+    -Option ReadOnly -Scope Script
+New-Variable -Name 'LOCAL_SYSTEM_IDENTITY' `
+    -Value 'S-1-5-18' -Option ReadOnly -Scope Script
+New-Variable -Name 'NETWORK_MANAGER_CLSID' `
+    -Value ([guid]'{DCB00C01-570F-4A9B-8D69-199FDBA5723B}') `
+    -Option ReadOnly -Scope Script
+New-Variable -Name 'GPUPDATE_EXECUTABLE_PATH' `
+    -Value "$env:SystemRoot\System32\gpupdate.exe" `
+    -Option ReadOnly -Scope Script -Force
+New-Variable -Name 'GPUPDATE_ARGUMENT' `
+    -Value "/force" `
+    -Option ReadOnly -Scope Script -Force	
+New-Variable -Name 'CMDKEY_EXECUTABLE_PATH' `
+    -Value "$env:SystemRoot\System32\cmdkey.exe" `
+    -Option ReadOnly -Scope Script -Force
+
+#
+# Invoke Main
+#
+function Invoke-Main ([hashtable]$InputParameters) {
+    $exitCode = 0
+	$RcConnectCampaign = '-'
+	$CheckOneDriveCampaign = '-'
+	$ReCheckOneDriveCampaign = '-'
+	$OneDriveResetCampaign = '-'
+	$OneDriveFinalCampaign = '-'
+    try {
+		Add-NexthinkRemoteActionDLL
+        Test-RunningAsInteractiveUser
+        Test-SupportedOSVersion
+
+        if((Test-DeviceConnectedToTestNw_New -TestUrl $NetworkTestUrl) -eq 0) {
+            $RcConnectCampaign = Invoke-RcConnectCampaign -CampaignID $ConnectRCCampaignId -CampaignTimeout $CampaignTimeout        
+			if($RcConnectCampaign -ne 'RcConnect Initiated'){
+				$OneDriveFinalCampaign = 'Not Repaired. User Denied.'
+			}
+        } else {
+            Run-GroupPolicy
+			$CheckOneDriveCampaign,$bFixed = Invoke-Campaign -CampaignID $CheckOneDriveCampaignId -CampaignQuestion $CheckOneDriveCampaignQuestion `
+                                     -CampaignAnswer $CheckOneDriveCampaignAnswer -CampaignTimeout $CampaignTimeout
+            if(-not($bFixed) -and ($CheckOneDriveCampaign -eq 'Remediation Started')) {
+                Clear-OneDriveCredentials  
+			$ReCheckOneDriveCampaign,$bFix = Invoke-Campaign -CampaignID $ReCheckOneDriveCampaignId -CampaignQuestion $ReCheckOneDriveCampaignQuestion `
+                                         -CampaignAnswer $ReCheckOneDriveCampaignAnswer -CampaignTimeout $CampaignTimeout				
+                if(-not($bFix) -and ($ReCheckOneDriveCampaign -eq 'Remediation Started')) {
+                    $OneDriveResetCampaign = Invoke-OneDriveResetCampaign -CampaignId $OneDriveResetCampaignId -CampaignTimeout $CampaignTimeout
+					if($OneDriveResetCampaign -eq 'Reset Initiated'){
+						Reset-OneDrive
+						#$OneDriveFinalCampaign = Invoke-FinalCampaign -CampaignId $OneDriveFinalCampaignId -CampaignTimeout $CampaignTimeout
+					}
+                }
+            }
+			if(($CheckOneDriveCampaign -eq "Remediation Completed") -or ($ReCheckOneDriveCampaign -eq "Remediation Completed") -or ($OneDriveResetCampaign -eq "Reset Initiated")){
+				$OneDriveFinalCampaign = Invoke-FinalCampaign -CampaignId $OneDriveFinalCampaignId -CampaignTimeout $CampaignTimeout
+			}
+			else{
+				$OneDriveFinalCampaign = 'Not Repaired. User Denied.'
+			}
+        }
+    } catch {
+        Write-StatusMessage -Message $_
+        $exitCode = 1
+    } 
+	finally{
+    Update-EngineOutputVariables -RcConnectCampaign $RcConnectCampaign -CheckOneDriveCampaign $CheckOneDriveCampaign -ReCheckOneDriveCampaign $ReCheckOneDriveCampaign  -OneDriveResetCampaign $OneDriveResetCampaign -OneDriveFinalCampaign $OneDriveFinalCampaign
+    }
+    return $exitCode
+}
+
+
+function Update-EngineOutputVariables([string]$RcConnectCampaign, [string]$CheckOneDriveCampaign, [string]$ReCheckOneDriveCampaign, [string]$OneDriveResetCampaign, [string]$OneDriveFinalCampaign) {
+		
+		[nxt]::WriteOutputString('RcConnectCampaignStatus', $RcConnectCampaign)
+		if($ReCheckOneDriveCampaign -ne '-'){
+			[nxt]::WriteOutputString('REMEDIATION_STATUS', $ReCheckOneDriveCampaign)
+		}
+		else{
+			[nxt]::WriteOutputString('REMEDIATION_STATUS', $CheckOneDriveCampaign)
+		}
+		[nxt]::WriteOutputString('ReCheckOneDriveCampaignStatus', $ReCheckOneDriveCampaign)
+		[nxt]::WriteOutputString('OneDriveResetCampaignStatus', $OneDriveResetCampaign)
+		[nxt]::WriteOutputString('REPAIR_STATUS', $OneDriveFinalCampaign)
+}
+
+
+#
+# Template functions
+#
+function Add-NexthinkRemoteActionDLL {
+
+    $RemoteActionPath = "$env:NEXTHINK\RemoteActions\nxtremoteactions.dll"
+    $RemoteCampaignPath = "$env:NEXTHINK\RemoteActions\nxtcampaignaction.dll"
+
+    if (-not (Test-Path -Path $RemoteActionPath) -and (Test-Path -Path $RemoteCampaignPath))
+     { 
+        throw "$($ERROR_EXCEPTION_TYPE.Environment) Nexthink Remote Action DLL not found."
+        throw "$($ERROR_EXCEPTION_TYPE.Environment) Nexthink DLL nxtcampaignaction.dll not found." 
+     }
+    Add-Type -Path $RemoteActionPath
+    Add-Type -Path $RemoteCampaignPath
+}
+
+function Test-RunningAsInteractiveUser {
+    if (Confirm-CurrentUserIsLocalSystem) {
+        throw "$($ERROR_EXCEPTION_TYPE.Environment) This script must be run as Interactive User. "
+    }
+}
+
+function Confirm-CurrentUserIsLocalSystem {
+    $currentIdentity = Get-CurrentIdentity
+    return $currentIdentity -eq $LOCAL_SYSTEM_IDENTITY
+}
+
+function Get-CurrentIdentity {
+    return [security.principal.windowsidentity]::GetCurrent().User.ToString()
+}
+
+function Test-SupportedOSVersion {
+    $OSVersion = (Get-OSVersion) -as [version]
+    if (-not ($OSVersion)) {
+        throw "$($ERROR_EXCEPTION_TYPE.Environment) This script could not return OS version. "
+    }
+    if (($OSVersion.Major -ne 6 -or $OSVersion.Minor -ne 1) -and `
+        ($OSVersion.Major -ne 10)) {
+        throw "$($ERROR_EXCEPTION_TYPE.Environment) This script is compatible with Windows 7 and 10 only. "
+    }
+}
+
+function Get-OSVersion {
+    return Get-WmiObject -Class Win32_OperatingSystem `
+                         -Filter 'ProductType = 1' -ErrorAction Stop | `
+               Select-Object -ExpandProperty Version
+}
+
+function Write-StatusMessage ([psobject]$Message) {
+    $exceptionMessage = $Message.ToString()
+
+    if ($Message.InvocationInfo.ScriptLineNumber) {
+        $version = Get-ScriptVersion
+        if (-not [string]::IsNullOrEmpty($version)) {
+            $scriptVersion = "Version: $version. "
+        }
+
+        $errorMessageLine = $scriptVersion + "Line '$($Message.InvocationInfo.ScriptLineNumber)': "
+    }
+
+    $host.ui.WriteErrorLine($errorMessageLine + $exceptionMessage)
+}
+
+function Get-ScriptVersion {
+    $scriptContent = Get-Content $MyInvocation.ScriptName | Out-String
+    if ($scriptContent -notmatch '<#[\r\n]{2}.SYNOPSIS[^\#\>]*(.NOTES[^\#\>]*)\#>') { return }
+
+    $helpBlock = $Matches[1].Split([environment]::NewLine)
+
+    foreach ($line in $helpBlock) {
+        if ($line -match 'Version:') {
+            return $line.Split(':')[1].Split('-')[0].Trim()
+        }
+    }
+}
+
+function Test-InternetConnectivity {
+    $type = [type]::GetTypeFromCLSID($NETWORK_MANAGER_CLSID)
+    $instance = [activator]::CreateInstance($type)
+
+    if (-not $instance.IsConnectedToInternet) {
+        throw "$($ERROR_EXCEPTION_TYPE.Environment) No Internet connection available. "
+    }
+}
+
+function Test-DeviceConnectedToTestNw_New ([string]$TestUrl) {
+   [int] $retStatusCode = 0
+
+    try {
+        Test-InternetConnectivity 
+        $Status = ((Test-NetConnection -ComputerName "$($TestUrl)" -CommonTCPPort HTTP).TcpTestSucceeded)
+    } catch {
+        Write-StatusMessage -Message "Error when connecting to '$TestUrl': $_. "
+    } 
+
+    if ($status -ne $true) {
+        Write-StatusMessage -Message "Failed to connect: '$TestUrl'. "
+    } else {
+        Write-StatusMessage -Message "Successfully connected to: '$TestUrl'. "
+        $retStatusCode = 1
+    }
+
+    return $retStatusCode
+}
+
+
+function Test-DeviceConnectedToTestNw ([string]$TestUrl) {
+   [int] $retStatusCode = 0
+
+    try {
+        Test-InternetConnectivity 
+        $request = Get-WebRequest -Url $TestUrl
+        $request.Method = 'HEAD'
+        $response = Get-WebResponse -Request $request
+        $statusCode = $response.StatusCode
+    } catch {
+        Write-StatusMessage -Message "Error when connecting to '$TestUrl': $_. "
+    } finally {
+        if ($null -ne $response) {
+            $response.Close()
+        }
+    }
+
+    if ($statusCode -ne 'OK') {
+        Write-StatusMessage -Message "Obtained status code '$statusCode' when connecting to '$TestUrl'. "
+    } else {
+        Write-StatusMessage -Message "Successfully connected to '$TestUrl'. "
+        $retStatusCode = 1
+    }
+
+    return $retStatusCode
+}
+
+function Get-WebRequest ([string]$Url) {
+    return [net.webrequest]::Create($Url)
+}
+
+function Get-WebResponse ([psobject]$Request) {
+    return $Request.GetResponse()
+}
+
+function Run-GroupPolicy{
+	
+	try{
+        $out = Invoke-Process -FilePath $GPUPDATE_EXECUTABLE_PATH -Arguments $GPUPDATE_ARGUMENT
+        if($out.ExitCode -ne 0) {
+            Write-StatusMessage -Message "Failed to execute group policy with error: $($out.StdErr), and Output: $($out.StdOut)"
+        } else {
+             Write-StatusMessage -Message "User and Computer Group Policy updated successfully. "
+        }
+    } catch {
+        throw "Group policy update failed: $_"
+    }
+}
+
+function Invoke-Process ([string]$FilePath, [string]$Arguments) {
+    $output = @{ExitCode = -1
+                StdOut = $null
+                StdErr = $null}
+    
+    $processInfo = New-object -TypeName diagnostics.processstartinfo
+    $processInfo.CreateNoWindow = $true
+    $processInfo.UseShellExecute = $false
+    $processInfo.RedirectStandardOutput = $true
+    $processInfo.RedirectStandardError = $true
+    $processInfo.FileName = $FilePath
+    $processInfo.Arguments = $Arguments
+    $processInfo.WorkingDirectory = Split-Path $FilePath -Parent
+    $process = New-Object -TypeName diagnostics.process
+    $process.StartInfo = $processInfo
+
+    try {
+        [void]$process.Start()
+        $output.StdOut = $process.StandardOutput.ReadToEnd()
+        $output.StdErr = $process.StandardError.ReadToEnd()
+        $process.WaitForExit()
+    } catch {
+        throw "$($ERROR_EXCEPTION_TYPE.Internal) '$FilePath' execution failed. "
+    } finally {
+        $output.ExitCode = $process.ExitCode
+        $process.Dispose()
+    }
+
+    return $output
+}
+
+function Invoke-RcConnectCampaign ([string]$CampaignId, [string]$CampaignTimeout) {
+	$stopWatch = New-Object -TypeName System.Diagnostics.Stopwatch
+    $stopWatch.Start()
+    while ($stopWatch.Elapsed.TotalSeconds -lt $ScreenUnlockTimeout) {
+		if (!(Test-ScreenIsLocked) -and !(Test-FullScreenApp)) {
+			$unlocked = $true
+			if(Confirm-StringIsNotEmpty -Value $CampaignId) {
+				
+				$response = Get-CampaignResponse -CampaignId $CampaignId -CampaignTimeout $CampaignTimeout
+				$status = Get-CampaignResponseStatus -Response $response
+
+				switch ($status) {
+					'fully' { return "RcConnect Initiated" }
+					'postponed' { return 'RcConnect Denied'}
+					'declined' { return 'RcConnect Denied' }
+					'timeout' { return 'RcConnect TimeOut' }
+					'connectionfailed' { throw 'Connection Failed' }
+					'notificationfailed' { throw 'Notification Failed ' }
+					default { throw "Failed to handle RcConnect campaign response: $response. " }
+				}
+			} else {
+				throw "Empty RC connect Campaign Id."
+			}
+			$ScreenUnlockTimeout = 0
+		}	
+		else {
+			$unlocked = $false
+			Start-Sleep -seconds 20
+		}
+	}
+	$stopWatch.Stop()
+	if ($unlocked -eq $false) {
+		if (Test-FullScreenApp) {
+			Write-StatusMessage -Message "Info: Running fullscreen app and timeout was reached, user not prompted. "
+			return "Office Repair - Timeout - Fullscreen app"
+		}
+		Write-StatusMessage -Message "Info: Screen was locked and timeout was reached, user not prompted."
+		return "Office Repair - Timeout - Screen Locked"
+	}
+}
+
+function Confirm-StringIsNotEmpty ([string]$Value) {
+    return -not [string]::IsNullOrEmpty((Format-StringValue -Value $Value))
+}
+
+function Format-StringValue ([string]$Value) {
+    return $Value.Replace('"', '').Replace("'", '').Trim()
+}
+
+
+function Get-CampaignResponse ([string]$CampaignId) {
+    return [Nxt.CampaignAction]::RunCampaign($CampaignId, $CampaignTimeout)
+}
+
+function Get-CampaignResponseStatus ($Response) {
+    return [Nxt.CampaignAction]::GetResponseStatus($Response)
+}
+
+function Get-CampaignResponseAnswer ($Response, [string]$QuestionName) {
+     return [Nxt.CampaignAction]::GetResponseAnswer($Response, $QuestionName)[0]
+}
+
+function Invoke-Campaign([string]$CampaignID, [string]$CampaignQuestion, [string]$CampaignAnswer, [string]$CampaignTimeout) {
+[bool]$fixed = $false
+	   $stopWatch = New-Object -TypeName System.Diagnostics.Stopwatch
+	   $stopWatch.Start()
+       while ($stopWatch.Elapsed.TotalSeconds -lt $ScreenUnlockTimeout) {
+			if (!(Test-ScreenIsLocked) -and !(Test-FullScreenApp)) {
+				$unlocked = $true
+				if((Confirm-StringIsNotEmpty -Value $CampaignId)) {
+					$response = Get-CampaignResponse -CampaignId $CampaignId -CampaignTimeout $CampaignTimeout
+					$status = Get-CampaignResponseStatus -Response $response
+					switch ($status) {
+						'fully' {
+							$answer = Get-CampaignResponseAnswer -Response $response -QuestionName $CampaignQuestion
+							if ($answer -eq $CampaignAnswer) {
+									#Write-StatusMessage -Message "User verified that OneDrive Issue is Fixed."
+									$fixed = $true
+									return 'Remediation Completed',$fixed
+							} else {
+								return "Remediation Started",$fixed
+							}
+						}
+				    'postponed' { return 'Remediation Denied',$fixed}
+					'declined' { return 'Remediation Denied',$fixed }
+					'timeout' { return 'Remediation TimeOut',$fixed }
+					'connectionfailed' { throw 'Connection Failed' }
+					'notificationfailed' { throw 'Notification Failed ' }
+                default { throw "Failed to handle campaign response: $response. " }
+					}
+				} else {
+					throw "Empty Check OneDrive Issue Campaign ID."
+				}
+				$ScreenUnlockTimeout = 0
+		}
+		else {
+			$unlocked = $false
+			Start-Sleep -seconds 20
+		}
+	}
+	$stopWatch.Stop()
+	if ($unlocked -eq $false) {
+		if (Test-FullScreenApp) {
+			Write-StatusMessage -Message "Info: Running fullscreen app and timeout was reached, user not prompted. "
+			return "Office Repair Complete - Timeout - Fullscreen app"
+		}
+		Write-StatusMessage -Message "Info: Screen was locked and timeout was reached, user not prompted."
+		return "Office Repair Complete - Timeout - Screen Locked"
+	}
+	return $fixed
+}
+
+function Clear-OneDriveCredentials {
+    try{
+		$Credentials = (& $CMDKEY_EXECUTABLE_PATH /list | Where-Object {$_ -like "*Target=*OneDrive*"})
+		Foreach ($Target in $Credentials) {
+		    $Target = ($Target -split (":", 2) | Select-Object -Skip 1).substring(1)
+		    $Argument = "/delete:" + $Target
+		    $Output = (& $CMDKEY_EXECUTABLE_PATH $Argument)
+            if($Output -eq "CMDKEY: Credential deleted successfully.") {
+               Write-StatusMessage -Message "Successfully Deleted: '$Target'." 
+            } else {
+                Write-StatusMessage -Message "Failed to delete: '$Target'." 
+            }
+		}
+	} catch {
+        throw "Failed to clear OneDrive Credentials with Error: $_"
+	}
+}
+
+function Reset-OneDrive {
+    try {
+        Write-StatusMessage -Message "Resetting One Drive."
+        if(Test-Path -Path "$env:LOCALAPPDATA\Microsoft\OneDrive\onedrive.exe") {
+            Start-Process "$env:LOCALAPPDATA\Microsoft\OneDrive\onedrive.exe" -ArgumentList "/reset" -WindowStyle Hidden
+    
+        } elseif(Test-Path -Path "$env:ProgramFiles\Microsoft OneDrive\onedrive.exe") {
+            Start-Process "$env:ProgramFiles\Microsoft OneDrive\onedrive.exe" -ArgumentList "/reset" -WindowStyle Hidden
+    
+        } elseif(Test-Path -Path "$env:ProgramFiles(x86)\Microsoft OneDrive\onedrive.exe") {
+            Start-Process "$env:ProgramFiles(x86)\Microsoft OneDrive\onedrive.exe" -ArgumentList "/reset" -WindowStyle Hidden
+    
+        } else {
+            throw 'Failed to find OneDrive.exe path.'
+        }
+    } catch {
+        throw 'Failed to reset OneDrive: $_.'
+    }
+}
+
+function Invoke-OneDriveResetCampaign ([string]$CampaignId, [string]$CampaignTimeout){
+	$stopWatch = New-Object -TypeName System.Diagnostics.Stopwatch
+    $stopWatch.Start()
+    while ($stopWatch.Elapsed.TotalSeconds -lt $ScreenUnlockTimeout) {
+		if (!(Test-ScreenIsLocked) -and !(Test-FullScreenApp)) {
+			$unlocked = $true
+			if(Confirm-StringIsNotEmpty -Value $CampaignId) {
+				$response = Get-CampaignResponse -CampaignId $CampaignId -CampaignTimeout $CampaignTimeout
+				$status = Get-CampaignResponseStatus -Response $response
+
+				switch ($status) {
+					'fully' { return "Reset Initiated" }
+					'postponed' { return 'Reset Denied'}
+					'declined' { return 'Reset Denied' }
+					'timeout' { return 'Reset TimeOut' }
+					'connectionfailed' { throw 'Connection Failed' }
+					'notificationfailed' { throw 'Notification Failed ' }
+					default { throw "Failed to handle reset campaign response: $response. " }
+				  }
+			} else {
+				throw "Empty OneDrive Reset Campaign Id."
+			}
+			$ScreenUnlockTimeout = 0
+		}	
+		else {
+			$unlocked = $false
+			Start-Sleep -seconds 20
+		}
+	}
+	$stopWatch.Stop()
+	if ($unlocked -eq $false) {
+		if (Test-FullScreenApp) {
+			Write-StatusMessage -Message "Info: Running fullscreen app and timeout was reached, user not prompted. "
+			return "Office Repair - Timeout - Fullscreen app"
+		}
+		Write-StatusMessage -Message "Info: Screen was locked and timeout was reached, user not prompted."
+		return "Office Repair - Timeout - Screen Locked"
+	}
+}
+
+function Invoke-FinalCampaign ([string]$CampaignId, [string]$CampaignTimeout) {
+	$stopWatch = New-Object -TypeName System.Diagnostics.Stopwatch
+    $stopWatch.Start()
+    while ($stopWatch.Elapsed.TotalSeconds -lt $ScreenUnlockTimeout) {
+		if (!(Test-ScreenIsLocked) -and !(Test-FullScreenApp)) {
+			$unlocked = $true
+			if((Confirm-StringIsNotEmpty -Value $CampaignId)) {
+				$response = Get-CampaignResponse -CampaignId $CampaignId -CampaignTimeout $CampaignTimeout
+				$status = Get-CampaignResponseStatus -Response $response
+				switch ($status) {
+					'fully' {
+						if ((Get-CampaignResponseAnswer -Response $response -QuestionName 'OneDriveReset - final message') -eq 'IssueResolved') {
+							return 'Repaired. User confirmed it is OK'
+						}
+						#throw 'The user declined to close Microsoft Edge. Microsoft Edge settings clearing action could not be performed. '
+						elseif((Get-CampaignResponseAnswer -Response $response -QuestionName 'OneDriveReset - final message') -eq 'IssueNotResolved'){
+							return 'Not Repaired. User confirmed it is not OK'
+						}
+					}
+					'timeout' { return "Not Repaired. User timeout"}
+						'postponed' { return "Not Repaired. User denied"}
+						'declined' { return "Not Repaired. User denied"}
+						'connectionfailed' { throw 'Connection Failed' }
+						'notificationfailed' { throw 'Notification Failed ' }
+						default { throw "Failed to handle campaign response: $response. " }
+				}
+			}
+			else {
+			Write-StatusMessage -Message "Empty Campaign ID"
+			}
+			$ScreenUnlockTimeout = 0
+		}	
+		else {
+			$unlocked = $false
+			Start-Sleep -seconds 20
+		}
+	}
+	$stopWatch.Stop()
+	if ($unlocked -eq $false) {
+		if (Test-FullScreenApp) {
+			Write-StatusMessage -Message "Info: Running fullscreen app and timeout was reached, user not prompted. "
+			return "Office Repair - Timeout - Fullscreen app"
+		}
+		Write-StatusMessage -Message "Info: Screen was locked and timeout was reached, user not prompted."
+		return "Office Repair - Timeout - Screen Locked"
+	}
+}
+
+function Test-ScreenIsLocked {
+    Add-Type -Language 'CSharp' -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+
+namespace UserNotificationsChecker
+{
+    public static class QueryUserNotificationState
+    {
+        public enum UserNotificationState
+        {
+            NotPresent = 1,
+            Busy = 2,
+            RunningDirect3dFullScreen = 3,
+            PresentationMode = 4,
+            AcceptsNotifications = 5,
+            QuietTime = 6
+        }
+
+        [DllImport("shell32.dll")]
+        static extern int SHQueryUserNotificationState(out UserNotificationState userNotificationState);
+
+        public static UserNotificationState State()
+        {
+            UserNotificationState state;
+            int returnVal = SHQueryUserNotificationState(out state);
+
+            if(returnVal != 0)
+                throw new Exception("SHQueryUserNotificationState finished with error " + returnVal);
+
+            return state;
+        }
+    }
+}
+"@
+    $state = [UserNotificationsChecker.QueryUserNotificationState]::State()
+    return $($state -eq [UserNotificationsChecker.QueryUserNotificationState+UserNotificationState]::NotPresent)
+}
+
+function Test-FullScreenApp {
+    $private:ErrorActionPreference = "Stop"
+
+    $WinClass = Add-Type -Name WinClass -Namespace Win32 -PassThru -MemberDefinition @'
+    [DllImport("user32.dll", SetLastError = false)]
+    public static extern IntPtr GetDesktopWindow();
+    [DllImport("user32.dll")]
+    public static extern IntPtr GetShellWindow();
+'@
+    $shell = $WinClass::GetShellWindow()
+    $desktop = $WinClass::GetDesktopWindow()
+
+    $fullscreen = $false
+    Add-Type -AssemblyName @('UIAutomationClient', 'UIAutomationTypes')
+    $desk = [Windows.Automation.AutomationElement]::FromHandle($desktop)
+    $deskSize = $desk.Current.BoundingRectangle
+    $cTrue = [Windows.Automation.PropertyCondition]::TrueCondition
+    $windowList = $desk.FindAll("Children", $cTrue)
+    foreach ($window in $windowList.current) {
+        $handle = $window.NativeWindowHandle
+        if ($handle -eq $desktop -or $handle -eq $shell) { continue }
+        $fullscreen = ($window.BoundingRectangle -eq $deskSize)
+        if ($fullscreen) { break }
+    }
+    return $fullscreen
+}
+#
+# Main script flow
+#
+Invoke-Main -InputParameters $MyInvocation.BoundParameters
+
+
+# SIG # Begin signature block
+# MIIpqQYJKoZIhvcNAQcCoIIpmjCCKZYCAQExDzANBglghkgBZQMEAgEFADB5Bgor
+# BgEEAYI3AgEEoGswaTA0BgorBgEEAYI3AgEeMCYCAwEAAAQQH8w7YFlLCE63JNLG
+# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCCGpRXdGAQNwsZS
+# pjO8SKuh3U9U1v3Hm7DPPTRD8S+rvqCCDpgwggawMIIEmKADAgECAhAIrUCyYNKc
+# TJ9ezam9k67ZMA0GCSqGSIb3DQEBDAUAMGIxCzAJBgNVBAYTAlVTMRUwEwYDVQQK
+# EwxEaWdpQ2VydCBJbmMxGTAXBgNVBAsTEHd3dy5kaWdpY2VydC5jb20xITAfBgNV
+# BAMTGERpZ2lDZXJ0IFRydXN0ZWQgUm9vdCBHNDAeFw0yMTA0MjkwMDAwMDBaFw0z
+# NjA0MjgyMzU5NTlaMGkxCzAJBgNVBAYTAlVTMRcwFQYDVQQKEw5EaWdpQ2VydCwg
+# SW5jLjFBMD8GA1UEAxM4RGlnaUNlcnQgVHJ1c3RlZCBHNCBDb2RlIFNpZ25pbmcg
+# UlNBNDA5NiBTSEEzODQgMjAyMSBDQTEwggIiMA0GCSqGSIb3DQEBAQUAA4ICDwAw
+# ggIKAoICAQDVtC9C0CiteLdd1TlZG7GIQvUzjOs9gZdwxbvEhSYwn6SOaNhc9es0
+# JAfhS0/TeEP0F9ce2vnS1WcaUk8OoVf8iJnBkcyBAz5NcCRks43iCH00fUyAVxJr
+# Q5qZ8sU7H/Lvy0daE6ZMswEgJfMQ04uy+wjwiuCdCcBlp/qYgEk1hz1RGeiQIXhF
+# LqGfLOEYwhrMxe6TSXBCMo/7xuoc82VokaJNTIIRSFJo3hC9FFdd6BgTZcV/sk+F
+# LEikVoQ11vkunKoAFdE3/hoGlMJ8yOobMubKwvSnowMOdKWvObarYBLj6Na59zHh
+# 3K3kGKDYwSNHR7OhD26jq22YBoMbt2pnLdK9RBqSEIGPsDsJ18ebMlrC/2pgVItJ
+# wZPt4bRc4G/rJvmM1bL5OBDm6s6R9b7T+2+TYTRcvJNFKIM2KmYoX7BzzosmJQay
+# g9Rc9hUZTO1i4F4z8ujo7AqnsAMrkbI2eb73rQgedaZlzLvjSFDzd5Ea/ttQokbI
+# YViY9XwCFjyDKK05huzUtw1T0PhH5nUwjewwk3YUpltLXXRhTT8SkXbev1jLchAp
+# QfDVxW0mdmgRQRNYmtwmKwH0iU1Z23jPgUo+QEdfyYFQc4UQIyFZYIpkVMHMIRro
+# OBl8ZhzNeDhFMJlP/2NPTLuqDQhTQXxYPUez+rbsjDIJAsxsPAxWEQIDAQABo4IB
+# WTCCAVUwEgYDVR0TAQH/BAgwBgEB/wIBADAdBgNVHQ4EFgQUaDfg67Y7+F8Rhvv+
+# YXsIiGX0TkIwHwYDVR0jBBgwFoAU7NfjgtJxXWRM3y5nP+e6mK4cD08wDgYDVR0P
+# AQH/BAQDAgGGMBMGA1UdJQQMMAoGCCsGAQUFBwMDMHcGCCsGAQUFBwEBBGswaTAk
+# BggrBgEFBQcwAYYYaHR0cDovL29jc3AuZGlnaWNlcnQuY29tMEEGCCsGAQUFBzAC
+# hjVodHRwOi8vY2FjZXJ0cy5kaWdpY2VydC5jb20vRGlnaUNlcnRUcnVzdGVkUm9v
+# dEc0LmNydDBDBgNVHR8EPDA6MDigNqA0hjJodHRwOi8vY3JsMy5kaWdpY2VydC5j
+# b20vRGlnaUNlcnRUcnVzdGVkUm9vdEc0LmNybDAcBgNVHSAEFTATMAcGBWeBDAED
+# MAgGBmeBDAEEATANBgkqhkiG9w0BAQwFAAOCAgEAOiNEPY0Idu6PvDqZ01bgAhql
+# +Eg08yy25nRm95RysQDKr2wwJxMSnpBEn0v9nqN8JtU3vDpdSG2V1T9J9Ce7FoFF
+# UP2cvbaF4HZ+N3HLIvdaqpDP9ZNq4+sg0dVQeYiaiorBtr2hSBh+3NiAGhEZGM1h
+# mYFW9snjdufE5BtfQ/g+lP92OT2e1JnPSt0o618moZVYSNUa/tcnP/2Q0XaG3Ryw
+# YFzzDaju4ImhvTnhOE7abrs2nfvlIVNaw8rpavGiPttDuDPITzgUkpn13c5Ubdld
+# AhQfQDN8A+KVssIhdXNSy0bYxDQcoqVLjc1vdjcshT8azibpGL6QB7BDf5WIIIJw
+# 8MzK7/0pNVwfiThV9zeKiwmhywvpMRr/LhlcOXHhvpynCgbWJme3kuZOX956rEnP
+# LqR0kq3bPKSchh/jwVYbKyP/j7XqiHtwa+aguv06P0WmxOgWkVKLQcBIhEuWTatE
+# QOON8BUozu3xGFYHKi8QxAwIZDwzj64ojDzLj4gLDb879M4ee47vtevLt/B3E+bn
+# KD+sEq6lLyJsQfmCXBVmzGwOysWGw/YmMwwHS6DTBwJqakAwSEs0qFEgu60bhQji
+# WQ1tygVQK+pKHJ6l/aCnHwZ05/LWUpD9r4VIIflXO7ScA+2GRfS0YW6/aOImYIbq
+# yK+p/pQd52MbOoZWeE4wggfgMIIFyKADAgECAhALDKbP3yklO2dxQOvaMSzEMA0G
+# CSqGSIb3DQEBCwUAMGkxCzAJBgNVBAYTAlVTMRcwFQYDVQQKEw5EaWdpQ2VydCwg
+# SW5jLjFBMD8GA1UEAxM4RGlnaUNlcnQgVHJ1c3RlZCBHNCBDb2RlIFNpZ25pbmcg
+# UlNBNDA5NiBTSEEzODQgMjAyMSBDQTEwHhcNMjIwMjA5MDAwMDAwWhcNMjUwMjA4
+# MjM1OTU5WjCBvTEdMBsGA1UEDwwUUHJpdmF0ZSBPcmdhbml6YXRpb24xEzARBgsr
+# BgEEAYI3PAIBAxMCTkwxETAPBgNVBAUTCDMwMTMyNzYyMQswCQYDVQQGEwJOTDEW
+# MBQGA1UECBMNTm9vcmQtSG9sbGFuZDETMBEGA1UEBxMKQW1zdGVsdmVlbjEcMBoG
+# A1UEChMTQXRvcyBOZWRlcmxhbmQgQi5WLjEcMBoGA1UEAxMTQXRvcyBOZWRlcmxh
+# bmQgQi5WLjCCAiIwDQYJKoZIhvcNAQEBBQADggIPADCCAgoCggIBALhcK/+mbZpB
+# kRX4jHuUpyKDxe5omztTg/Of9QzqEGksIlncuXM7kV448wTZ9wgz7DNluBnnDdNU
+# V/IFhYZCmPnm3suwr38gb0mfLejKjmHLXVLzNycSoCI6h+pK/QAuhElHD1lLqJGk
+# 5HEJk3g1Oo6/s3uCOGJ0EhLg+Sdu43DgupmSvM17WACkVKPsTLh0NpOuePRvBdaZ
+# /fd1391Hf8OOf9ExjmpVBwPoHrQ7Ly0/F79QoRBBjUIqyu6EhFvivAQ6uWZTSD3W
+# G16L980HOBgHkC/N3gyi29GP/aNQxcEBxHIoI3aCXhUqEUODSIE0sTETbnD2ipIy
+# uXX3Vm4H3fy6Hdw4ZFaIzr29PU4oH5exUA1CC/eTB2L0taKwv318fT27kXm3q0Os
+# G4G8P+l3SQHeVIL4/CxiiabP96SoadMnezKWZDQox35uopXvd0foDrXfU4cl/3OJ
+# AnYcBPnJ5dRJn1vPjAEJh1FFyPfj8c5WeR8ma8FIQAbgUOZOlkNTUDcKIhcnSjmL
+# hc4ZEL2CjyQPWE3QCmlNgn60Q7LbdWy9lahH8dvm7LnjWTHiSKNEtWTjo54qMqJD
+# GKHJWYMdcyDelDu6lqzuJ+UZic8X4cBSG/GEWb2I7rRGax1meNXsjzjZUbKQW6uE
+# ZcU136U5UQdEOmXT7Al5glIF9C7LAcydAgMBAAGjggItMIICKTAfBgNVHSMEGDAW
+# gBRoN+Drtjv4XxGG+/5hewiIZfROQjAdBgNVHQ4EFgQUXFb5ZJ6SNa8Iuaq5kP34
+# qOxdK2MwJgYDVR0RBB8wHaAbBggrBgEFBQcIA6APMA0MC05MLTMwMTMyNzYyMA4G
+# A1UdDwEB/wQEAwIHgDATBgNVHSUEDDAKBggrBgEFBQcDAzCBtQYDVR0fBIGtMIGq
+# MFOgUaBPhk1odHRwOi8vY3JsMy5kaWdpY2VydC5jb20vRGlnaUNlcnRUcnVzdGVk
+# RzRDb2RlU2lnbmluZ1JTQTQwOTZTSEEzODQyMDIxQ0ExLmNybDBToFGgT4ZNaHR0
+# cDovL2NybDQuZGlnaWNlcnQuY29tL0RpZ2lDZXJ0VHJ1c3RlZEc0Q29kZVNpZ25p
+# bmdSU0E0MDk2U0hBMzg0MjAyMUNBMS5jcmwwPQYDVR0gBDYwNDAyBgVngQwBAzAp
+# MCcGCCsGAQUFBwIBFhtodHRwOi8vd3d3LmRpZ2ljZXJ0LmNvbS9DUFMwgZQGCCsG
+# AQUFBwEBBIGHMIGEMCQGCCsGAQUFBzABhhhodHRwOi8vb2NzcC5kaWdpY2VydC5j
+# b20wXAYIKwYBBQUHMAKGUGh0dHA6Ly9jYWNlcnRzLmRpZ2ljZXJ0LmNvbS9EaWdp
+# Q2VydFRydXN0ZWRHNENvZGVTaWduaW5nUlNBNDA5NlNIQTM4NDIwMjFDQTEuY3J0
+# MAwGA1UdEwEB/wQCMAAwDQYJKoZIhvcNAQELBQADggIBAHJfo+r8+hLbnk8fDl1A
+# QaOEgNyM/jNrX6vMD1JiixD1z/o2lik0+vOeyrWLqYFpl1EJBF/BGpxggXxu1Pw/
+# N8YAMvC1eBf1ZVRlh4uHAnjUFQd/8ln8J4u6lA7HGmdnsSqNZ64oxTtCZ7XO72IJ
+# ElycgSddl9rx6ZtMX6YT9TsnxXzpPv9PhlJRmmfMR/in7L5WgBQz3MOoBSYmFMZA
+# hAV8WwaV3fWD4PvwTOAwlAz8btF4yNtc1GHapOYKIMdywaAFdCLuZ6C/L4N7dqHI
+# uHaQpSOQrnAKh5vpf9yyyRNBL1kMChthldyEWXd8BVdbFhTGnCFVjyTsN6KK6yqs
+# 0jQt+cKuSRdUjoM3F1/pjZ1fVztwOWfnAqdURrfYq1dmIYd3qo3lqJ1kCnm80dqo
+# yM/H8+4Na7SCC4ClRTAMCxRPGg/y0LjhP/Jf3mQzy2tpwU3Tdew5wiBjlw6r0reB
+# hVF/Q4XpHs1rLVBAWmeAK5c60FX/V3R5XTol+ai1Oi891Gl5OQ4ABluegIbsw1bU
+# nNLo89rj27bW0LuaYQ2cYjUAmoLkCq8L5Fmil+uuTY9TYQUrzgm8KEMFFF+pQGtq
+# LowiQcprqVaKtIeZKZwhZl6HR7CPH1WSC770R61cZZEHGaIsoW89yxiuSq4tGQzp
+# lcYOSz+cPhoY3E4qC4ORj4lsMYIaZzCCGmMCAQEwfTBpMQswCQYDVQQGEwJVUzEX
+# MBUGA1UEChMORGlnaUNlcnQsIEluYy4xQTA/BgNVBAMTOERpZ2lDZXJ0IFRydXN0
+# ZWQgRzQgQ29kZSBTaWduaW5nIFJTQTQwOTYgU0hBMzg0IDIwMjEgQ0ExAhALDKbP
+# 3yklO2dxQOvaMSzEMA0GCWCGSAFlAwQCAQUAoHwwEAYKKwYBBAGCNwIBDDECMAAw
+# GQYJKoZIhvcNAQkDMQwGCisGAQQBgjcCAQQwHAYKKwYBBAGCNwIBCzEOMAwGCisG
+# AQQBgjcCARUwLwYJKoZIhvcNAQkEMSIEIOG0Sqz9LXZXq18n5W0GZ144Smk0EkZJ
+# rQIVBPHeKrT3MA0GCSqGSIb3DQEBAQUABIICAG37+8AoB6vlMxMW56i6IF+VKrGD
+# 7T5imZoOAmeqOnF46YKlPiap1cTsK+hAukYHSRw9AUZ9nQ8RgmhGPuOIeYhjWeJo
+# 3sUJ1Zt7QLNeUpXwSQG9gWH1Gt2gWA84qelEO9N9r+ed1bugp1v2+FKiLmHWJAo4
+# AZDJQqfi5bj3UJ/XRlw5V/n/+8cbN5sei08WJHY/a/6QM7qbXrMI7+ry7ldV4EoY
+# x4fnlxRk7UZC1Z/nie87nsuj8eLo0WsD3H1VfV6OJTsrrTQUY/Aqns1SkXRdY/36
+# z+jGDjLasgka89w1JMW8jFAU/RHgWmT+ANaZPL2yOUJ/fFzcmzyjO2Aj+DVE/5lb
+# mOgj7oLZgMFg0I5vwvNsxjxRhPx45NQIaN3Nqf61A5t7OG3k4Mp8I+P2X1nEk7fg
+# iQZe3wgVLbLLifAqDzrSAgFapiArd9xeU0GQKc3pt6xO+qj7D0TKJ+tuj6DIcxwo
+# l9X2RlbhVD7T4vU5XJoaL/erObz5zKo6WT4TTNbMY9AvtGZZA97kAnewp5uwug36
+# 5Fs+4BBNWygAxfthu2yBUS3R8BVrvlDZXDlsFZSxXBD+DqjVLDlsCry0FKesXo4+
+# W0jimgIt0EwN3ef+ZpgjHg30ogCW+MGogBkSfQSJ88MskRAx8QaMbvSiiQfBUJ+I
+# d5UJ4V/RC26s+9xgoYIXPTCCFzkGCisGAQQBgjcDAwExghcpMIIXJQYJKoZIhvcN
+# AQcCoIIXFjCCFxICAQMxDzANBglghkgBZQMEAgEFADB3BgsqhkiG9w0BCRABBKBo
+# BGYwZAIBAQYJYIZIAYb9bAcBMDEwDQYJYIZIAWUDBAIBBQAEIOQHEeEhU0UKDeKG
+# Yw8Vy47kNsUFXM1fbhGl148VgF2PAhA0nutbduP1281s4JHwDXDlGA8yMDIzMDYy
+# MzEyMTk0NlqgghMHMIIGwDCCBKigAwIBAgIQDE1pckuU+jwqSj0pB4A9WjANBgkq
+# hkiG9w0BAQsFADBjMQswCQYDVQQGEwJVUzEXMBUGA1UEChMORGlnaUNlcnQsIElu
+# Yy4xOzA5BgNVBAMTMkRpZ2lDZXJ0IFRydXN0ZWQgRzQgUlNBNDA5NiBTSEEyNTYg
+# VGltZVN0YW1waW5nIENBMB4XDTIyMDkyMTAwMDAwMFoXDTMzMTEyMTIzNTk1OVow
+# RjELMAkGA1UEBhMCVVMxETAPBgNVBAoTCERpZ2lDZXJ0MSQwIgYDVQQDExtEaWdp
+# Q2VydCBUaW1lc3RhbXAgMjAyMiAtIDIwggIiMA0GCSqGSIb3DQEBAQUAA4ICDwAw
+# ggIKAoICAQDP7KUmOsap8mu7jcENmtuh6BSFdDMaJqzQHFUeHjZtvJJVDGH0nQl3
+# PRWWCC9rZKT9BoMW15GSOBwxApb7crGXOlWvM+xhiummKNuQY1y9iVPgOi2Mh0Ku
+# JqTku3h4uXoW4VbGwLpkU7sqFudQSLuIaQyIxvG+4C99O7HKU41Agx7ny3JJKB5M
+# gB6FVueF7fJhvKo6B332q27lZt3iXPUv7Y3UTZWEaOOAy2p50dIQkUYp6z4m8rSM
+# zUy5Zsi7qlA4DeWMlF0ZWr/1e0BubxaompyVR4aFeT4MXmaMGgokvpyq0py2909u
+# eMQoP6McD1AGN7oI2TWmtR7aeFgdOej4TJEQln5N4d3CraV++C0bH+wrRhijGfY5
+# 9/XBT3EuiQMRoku7mL/6T+R7Nu8GRORV/zbq5Xwx5/PCUsTmFntafqUlc9vAapkh
+# LWPlWfVNL5AfJ7fSqxTlOGaHUQhr+1NDOdBk+lbP4PQK5hRtZHi7mP2Uw3Mh8y/C
+# LiDXgazT8QfU4b3ZXUtuMZQpi+ZBpGWUwFjl5S4pkKa3YWT62SBsGFFguqaBDwkl
+# U/G/O+mrBw5qBzliGcnWhX8T2Y15z2LF7OF7ucxnEweawXjtxojIsG4yeccLWYON
+# xu71LHx7jstkifGxxLjnU15fVdJ9GSlZA076XepFcxyEftfO4tQ6dwIDAQABo4IB
+# izCCAYcwDgYDVR0PAQH/BAQDAgeAMAwGA1UdEwEB/wQCMAAwFgYDVR0lAQH/BAww
+# CgYIKwYBBQUHAwgwIAYDVR0gBBkwFzAIBgZngQwBBAIwCwYJYIZIAYb9bAcBMB8G
+# A1UdIwQYMBaAFLoW2W1NhS9zKXaaL3WMaiCPnshvMB0GA1UdDgQWBBRiit7QYfyP
+# MRTtlwvNPSqUFN9SnDBaBgNVHR8EUzBRME+gTaBLhklodHRwOi8vY3JsMy5kaWdp
+# Y2VydC5jb20vRGlnaUNlcnRUcnVzdGVkRzRSU0E0MDk2U0hBMjU2VGltZVN0YW1w
+# aW5nQ0EuY3JsMIGQBggrBgEFBQcBAQSBgzCBgDAkBggrBgEFBQcwAYYYaHR0cDov
+# L29jc3AuZGlnaWNlcnQuY29tMFgGCCsGAQUFBzAChkxodHRwOi8vY2FjZXJ0cy5k
+# aWdpY2VydC5jb20vRGlnaUNlcnRUcnVzdGVkRzRSU0E0MDk2U0hBMjU2VGltZVN0
+# YW1waW5nQ0EuY3J0MA0GCSqGSIb3DQEBCwUAA4ICAQBVqioa80bzeFc3MPx140/W
+# hSPx/PmVOZsl5vdyipjDd9Rk/BX7NsJJUSx4iGNVCUY5APxp1MqbKfujP8DJAJsT
+# HbCYidx48s18hc1Tna9i4mFmoxQqRYdKmEIrUPwbtZ4IMAn65C3XCYl5+QnmiM59
+# G7hqopvBU2AJ6KO4ndetHxy47JhB8PYOgPvk/9+dEKfrALpfSo8aOlK06r8JSRU1
+# NlmaD1TSsht/fl4JrXZUinRtytIFZyt26/+YsiaVOBmIRBTlClmia+ciPkQh0j8c
+# wJvtfEiy2JIMkU88ZpSvXQJT657inuTTH4YBZJwAwuladHUNPeF5iL8cAZfJGSOA
+# 1zZaX5YWsWMMxkZAO85dNdRZPkOaGK7DycvD+5sTX2q1x+DzBcNZ3ydiK95ByVO5
+# /zQQZ/YmMph7/lxClIGUgp2sCovGSxVK05iQRWAzgOAj3vgDpPZFR+XOuANCR+hB
+# NnF3rf2i6Jd0Ti7aHh2MWsgemtXC8MYiqE+bvdgcmlHEL5r2X6cnl7qWLoVXwGDn
+# eFZ/au/ClZpLEQLIgpzJGgV8unG1TnqZbPTontRamMifv427GFxD9dAq6OJi7ngE
+# 273R+1sKqHB+8JeEeOMIA11HLGOoJTiXAdI/Otrl5fbmm9x+LMz/F0xNAKLY1gEO
+# uIvu5uByVYksJxlh9ncBjDCCBq4wggSWoAMCAQICEAc2N7ckVHzYR6z9KGYqXlsw
+# DQYJKoZIhvcNAQELBQAwYjELMAkGA1UEBhMCVVMxFTATBgNVBAoTDERpZ2lDZXJ0
+# IEluYzEZMBcGA1UECxMQd3d3LmRpZ2ljZXJ0LmNvbTEhMB8GA1UEAxMYRGlnaUNl
+# cnQgVHJ1c3RlZCBSb290IEc0MB4XDTIyMDMyMzAwMDAwMFoXDTM3MDMyMjIzNTk1
+# OVowYzELMAkGA1UEBhMCVVMxFzAVBgNVBAoTDkRpZ2lDZXJ0LCBJbmMuMTswOQYD
+# VQQDEzJEaWdpQ2VydCBUcnVzdGVkIEc0IFJTQTQwOTYgU0hBMjU2IFRpbWVTdGFt
+# cGluZyBDQTCCAiIwDQYJKoZIhvcNAQEBBQADggIPADCCAgoCggIBAMaGNQZJs8E9
+# cklRVcclA8TykTepl1Gh1tKD0Z5Mom2gsMyD+Vr2EaFEFUJfpIjzaPp985yJC3+d
+# H54PMx9QEwsmc5Zt+FeoAn39Q7SE2hHxc7Gz7iuAhIoiGN/r2j3EF3+rGSs+Qtxn
+# jupRPfDWVtTnKC3r07G1decfBmWNlCnT2exp39mQh0YAe9tEQYncfGpXevA3eZ9d
+# rMvohGS0UvJ2R/dhgxndX7RUCyFobjchu0CsX7LeSn3O9TkSZ+8OpWNs5KbFHc02
+# DVzV5huowWR0QKfAcsW6Th+xtVhNef7Xj3OTrCw54qVI1vCwMROpVymWJy71h6aP
+# TnYVVSZwmCZ/oBpHIEPjQ2OAe3VuJyWQmDo4EbP29p7mO1vsgd4iFNmCKseSv6De
+# 4z6ic/rnH1pslPJSlRErWHRAKKtzQ87fSqEcazjFKfPKqpZzQmiftkaznTqj1QPg
+# v/CiPMpC3BhIfxQ0z9JMq++bPf4OuGQq+nUoJEHtQr8FnGZJUlD0UfM2SU2LINIs
+# VzV5K6jzRWC8I41Y99xh3pP+OcD5sjClTNfpmEpYPtMDiP6zj9NeS3YSUZPJjAw7
+# W4oiqMEmCPkUEBIDfV8ju2TjY+Cm4T72wnSyPx4JduyrXUZ14mCjWAkBKAAOhFTu
+# zuldyF4wEr1GnrXTdrnSDmuZDNIztM2xAgMBAAGjggFdMIIBWTASBgNVHRMBAf8E
+# CDAGAQH/AgEAMB0GA1UdDgQWBBS6FtltTYUvcyl2mi91jGogj57IbzAfBgNVHSME
+# GDAWgBTs1+OC0nFdZEzfLmc/57qYrhwPTzAOBgNVHQ8BAf8EBAMCAYYwEwYDVR0l
+# BAwwCgYIKwYBBQUHAwgwdwYIKwYBBQUHAQEEazBpMCQGCCsGAQUFBzABhhhodHRw
+# Oi8vb2NzcC5kaWdpY2VydC5jb20wQQYIKwYBBQUHMAKGNWh0dHA6Ly9jYWNlcnRz
+# LmRpZ2ljZXJ0LmNvbS9EaWdpQ2VydFRydXN0ZWRSb290RzQuY3J0MEMGA1UdHwQ8
+# MDowOKA2oDSGMmh0dHA6Ly9jcmwzLmRpZ2ljZXJ0LmNvbS9EaWdpQ2VydFRydXN0
+# ZWRSb290RzQuY3JsMCAGA1UdIAQZMBcwCAYGZ4EMAQQCMAsGCWCGSAGG/WwHATAN
+# BgkqhkiG9w0BAQsFAAOCAgEAfVmOwJO2b5ipRCIBfmbW2CFC4bAYLhBNE88wU86/
+# GPvHUF3iSyn7cIoNqilp/GnBzx0H6T5gyNgL5Vxb122H+oQgJTQxZ822EpZvxFBM
+# Yh0MCIKoFr2pVs8Vc40BIiXOlWk/R3f7cnQU1/+rT4osequFzUNf7WC2qk+RZp4s
+# nuCKrOX9jLxkJodskr2dfNBwCnzvqLx1T7pa96kQsl3p/yhUifDVinF2ZdrM8HKj
+# I/rAJ4JErpknG6skHibBt94q6/aesXmZgaNWhqsKRcnfxI2g55j7+6adcq/Ex8HB
+# anHZxhOACcS2n82HhyS7T6NJuXdmkfFynOlLAlKnN36TU6w7HQhJD5TNOXrd/yVj
+# mScsPT9rp/Fmw0HNT7ZAmyEhQNC3EyTN3B14OuSereU0cZLXJmvkOHOrpgFPvT87
+# eK1MrfvElXvtCl8zOYdBeHo46Zzh3SP9HSjTx/no8Zhf+yvYfvJGnXUsHicsJttv
+# FXseGYs2uJPU5vIXmVnKcPA3v5gA3yAWTyf7YGcWoWa63VXAOimGsJigK+2VQbc6
+# 1RWYMbRiCQ8KvYHZE/6/pNHzV9m8BPqC3jLfBInwAM1dwvnQI38AC+R2AibZ8GV2
+# QqYphwlHK+Z/GqSFD/yYlvZVVCsfgPrA8g4r5db7qS9EFUrnEw4d2zc4GqEr9u3W
+# fPwwggWNMIIEdaADAgECAhAOmxiO+dAt5+/bUOIIQBhaMA0GCSqGSIb3DQEBDAUA
+# MGUxCzAJBgNVBAYTAlVTMRUwEwYDVQQKEwxEaWdpQ2VydCBJbmMxGTAXBgNVBAsT
+# EHd3dy5kaWdpY2VydC5jb20xJDAiBgNVBAMTG0RpZ2lDZXJ0IEFzc3VyZWQgSUQg
+# Um9vdCBDQTAeFw0yMjA4MDEwMDAwMDBaFw0zMTExMDkyMzU5NTlaMGIxCzAJBgNV
+# BAYTAlVTMRUwEwYDVQQKEwxEaWdpQ2VydCBJbmMxGTAXBgNVBAsTEHd3dy5kaWdp
+# Y2VydC5jb20xITAfBgNVBAMTGERpZ2lDZXJ0IFRydXN0ZWQgUm9vdCBHNDCCAiIw
+# DQYJKoZIhvcNAQEBBQADggIPADCCAgoCggIBAL/mkHNo3rvkXUo8MCIwaTPswqcl
+# LskhPfKK2FnC4SmnPVirdprNrnsbhA3EMB/zG6Q4FutWxpdtHauyefLKEdLkX9YF
+# PFIPUh/GnhWlfr6fqVcWWVVyr2iTcMKyunWZanMylNEQRBAu34LzB4TmdDttceIt
+# DBvuINXJIB1jKS3O7F5OyJP4IWGbNOsFxl7sWxq868nPzaw0QF+xembud8hIqGZX
+# V59UWI4MK7dPpzDZVu7Ke13jrclPXuU15zHL2pNe3I6PgNq2kZhAkHnDeMe2scS1
+# ahg4AxCN2NQ3pC4FfYj1gj4QkXCrVYJBMtfbBHMqbpEBfCFM1LyuGwN1XXhm2Tox
+# RJozQL8I11pJpMLmqaBn3aQnvKFPObURWBf3JFxGj2T3wWmIdph2PVldQnaHiZdp
+# ekjw4KISG2aadMreSx7nDmOu5tTvkpI6nj3cAORFJYm2mkQZK37AlLTSYW3rM9nF
+# 30sEAMx9HJXDj/chsrIRt7t/8tWMcCxBYKqxYxhElRp2Yn72gLD76GSmM9GJB+G9
+# t+ZDpBi4pncB4Q+UDCEdslQpJYls5Q5SUUd0viastkF13nqsX40/ybzTQRESW+UQ
+# UOsxxcpyFiIJ33xMdT9j7CFfxCBRa2+xq4aLT8LWRV+dIPyhHsXAj6KxfgommfXk
+# aS+YHS312amyHeUbAgMBAAGjggE6MIIBNjAPBgNVHRMBAf8EBTADAQH/MB0GA1Ud
+# DgQWBBTs1+OC0nFdZEzfLmc/57qYrhwPTzAfBgNVHSMEGDAWgBRF66Kv9JLLgjEt
+# UYunpyGd823IDzAOBgNVHQ8BAf8EBAMCAYYweQYIKwYBBQUHAQEEbTBrMCQGCCsG
+# AQUFBzABhhhodHRwOi8vb2NzcC5kaWdpY2VydC5jb20wQwYIKwYBBQUHMAKGN2h0
+# dHA6Ly9jYWNlcnRzLmRpZ2ljZXJ0LmNvbS9EaWdpQ2VydEFzc3VyZWRJRFJvb3RD
+# QS5jcnQwRQYDVR0fBD4wPDA6oDigNoY0aHR0cDovL2NybDMuZGlnaWNlcnQuY29t
+# L0RpZ2lDZXJ0QXNzdXJlZElEUm9vdENBLmNybDARBgNVHSAECjAIMAYGBFUdIAAw
+# DQYJKoZIhvcNAQEMBQADggEBAHCgv0NcVec4X6CjdBs9thbX979XB72arKGHLOyF
+# XqkauyL4hxppVCLtpIh3bb0aFPQTSnovLbc47/T/gLn4offyct4kvFIDyE7QKt76
+# LVbP+fT3rDB6mouyXtTP0UNEm0Mh65ZyoUi0mcudT6cGAxN3J0TU53/oWajwvy8L
+# punyNDzs9wPHh6jSTEAZNUZqaVSwuKFWjuyk1T3osdz9HNj0d1pcVIxv76FQPfx2
+# CWiEn2/K2yCNNWAcAgPLILCsWKAOQGPFmCLBsln1VWvPJ6tsds5vIy30fnFqI2si
+# /xK4VC0nftg62fC2h5b9W9FcrBjDTZ9ztwGpn1eqXijiuZQxggN2MIIDcgIBATB3
+# MGMxCzAJBgNVBAYTAlVTMRcwFQYDVQQKEw5EaWdpQ2VydCwgSW5jLjE7MDkGA1UE
+# AxMyRGlnaUNlcnQgVHJ1c3RlZCBHNCBSU0E0MDk2IFNIQTI1NiBUaW1lU3RhbXBp
+# bmcgQ0ECEAxNaXJLlPo8Kko9KQeAPVowDQYJYIZIAWUDBAIBBQCggdEwGgYJKoZI
+# hvcNAQkDMQ0GCyqGSIb3DQEJEAEEMBwGCSqGSIb3DQEJBTEPFw0yMzA2MjMxMjE5
+# NDZaMCsGCyqGSIb3DQEJEAIMMRwwGjAYMBYEFPOHIk2GM4KSNamUvL2Plun+HHxz
+# MC8GCSqGSIb3DQEJBDEiBCB6rR2Scuri98kWhl9l+bOcA/GcjyTdkfRHIyqveBHu
+# XzA3BgsqhkiG9w0BCRACLzEoMCYwJDAiBCDH9OG+MiiJIKviJjq+GsT8T+Z4HC1k
+# 0EyAdVegI7W2+jANBgkqhkiG9w0BAQEFAASCAgAZukB/szOQcwokIU67uVRuGXNE
+# 1r7076/M389J7mCbwe/C38VcYZBKviMddvYKm9/3CW8S+sz/VK8tEHqi6lBZmZRS
+# +edp/v1PVTshmc9L0BqJUF/oCTY+aRd/PkTo8HfhrVi7XnvNhiEvvjicuC1+i2wz
+# k+jkwqwihhzcp5Gp06Lj3eznH+13rrSFnco6tXCTuIsCA4deXdv0pjPUrmgPpqwe
+# W2ri9Qk088PNiIJM5if00SbOX+jKOFmyZAjvY+VNOwdeClLh+SiZqdBZVjkrbLKa
+# vuL5hGe4HzKCCnh6zuEGX6EtpQTaRF9xPuIXR5MqTTurvUeYBwK8e5p2ADnilt24
+# qS8zdrATZZD6S3b1Ea8wWjJou0YHBMqxuNgklIFRld/mqPVlxzBqWL5xDXDlYfVu
+# o0YXFhqhSw0unHgw2t76Qyl3dnCH6AAt0u7MdrtGhsrS/KsRSL3lEuVGyRuOeq6y
+# iupIKlLwBTlS9LA1h4WLjQGFY91q3nGMtFyAFAFoBWgnlch8ns0No8GqScLkGmlT
+# QmSet01aQ+CC2bjZ5DrE0f241z/RP5eQ2oS2Jfr6TyQalLdPdBsb9QDR9qVyEGJf
+# KeMwZsGnQmXiGoJY499ae3Wos20VRxCwU9kOnEPQM2XB1qGtB/IFvElxivbdVAPf
+# bNaKsUBs8K1pzYov9A==
+# SIG # End signature block
